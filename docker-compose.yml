@@ -1,0 +1,28 @@
+# PostgreSQL for local development and e2e tests.
+# Values come from .env (Docker Compose reads it automatically):
+#   docker compose up -d
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: nest-cinema-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USERNAME:-cinema}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-cinema}
+      POSTGRES_DB: ${DB_NAME:-cinema}
+      # Used by docker/initdb/01-create-test-db.sh
+      DB_TEST_NAME: ${DB_TEST_NAME:-cinema_test}
+    ports:
+      - '${DB_PORT:-5432}:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Runs once, when the data volume is created: creates the test database.
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:
