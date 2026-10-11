@@ -1,0 +1,1116 @@
+# Cinema API (HW4: authentication and roles) — executable request collection
+# (VS Code REST Client syntax).
+#
+# Before:
+#   docker compose up -d
+#   npm run migration:run
+#   npm run seed            # creates the administrator from ADMIN_EMAIL / ADMIN_PASSWORD
+#   npm run start:dev
+#
+# Run the requests TOP TO BOTTOM: tokens and ids are taken from earlier
+# responses into variables (nothing has to be copied by hand).
+# Every block has an "Expected:" line with the status code it should return.
+# Errors have one shape: { statusCode, message, error, path, timestamp }.
+#
+# Users in this file:
+#   admin  — the seeded administrator (dev-only credentials from .env.example)
+#   user   — a new user registered below (role "user")
+#   other  — a second user, to check that bookings of others are protected
+
+@baseUrl = http://localhost:3000
+@missingId = 00000000-0000-4000-8000-000000000000
+# Must match ADMIN_EMAIL / ADMIN_PASSWORD in your .env (values from .env.example)
+@adminEmail = admin@cinema.local
+@adminPassword = change-me-admin-password
+@userPassword = StrongPass123
+
+########################################################################
+# 1. Authentication: register, log in, current user
+########################################################################
+
+### Log in as the seeded administrator
+# Expected: 200 OK  { accessToken, refreshToken }
+# @name loginAdmin
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{adminEmail}}",
+  "password": "{{adminPassword}}"
+}
+
+###
+@adminToken = {{loginAdmin.response.body.accessToken}}
+
+### Register a user (timestamp keeps the email unique between runs).
+# The "role" field is ignored: a new user is always "user".
+# The response has no password and no passwordHash.
+# Expected: 201 Created  { id, email, role: "user", createdAt }
+# @name registerUser
+POST {{baseUrl}}/auth/register
+Content-Type: application/json
+
+{
+  "email": "user-{{$timestamp}}@example.com",
+  "password": "{{userPassword}}",
+  "role": "admin"
+}
+
+###
+@userEmail = {{registerUser.response.body.email}}
+
+### Register a second user (to check access to bookings of others)
+# Expected: 201 Created
+# @name registerOther
+POST {{baseUrl}}/auth/register
+Content-Type: application/json
+
+{
+  "email": "other-{{$timestamp}}@example.com",
+  "password": "{{userPassword}}"
+}
+
+###
+@otherEmail = {{registerOther.response.body.email}}
+
+### Register: the email is already taken
+# Expected: 409 Conflict
+POST {{baseUrl}}/auth/register
+Content-Type: application/json
+
+{
+  "email": "{{userEmail}}",
+  "password": "{{userPassword}}"
+}
+
+### Register: invalid email
+# Expected: 400 Bad Request
+POST {{baseUrl}}/auth/register
+Content-Type: application/json
+
+{
+  "email": "not-an-email",
+  "password": "{{userPassword}}"
+}
+
+### Register: password shorter than 8 characters
+# Expected: 400 Bad Request
+POST {{baseUrl}}/auth/register
+Content-Type: application/json
+
+{
+  "email": "short-{{$timestamp}}@example.com",
+  "password": "1234567"
+}
+
+### Log in as the user
+# Expected: 200 OK  { accessToken, refreshToken }
+# @name loginUser
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{userEmail}}",
+  "password": "{{userPassword}}"
+}
+
+###
+@userToken = {{loginUser.response.body.accessToken}}
+@userRefreshToken = {{loginUser.response.body.refreshToken}}
+
+### Log in as the second user
+# Expected: 200 OK
+# @name loginOther
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{otherEmail}}",
+  "password": "{{userPassword}}"
+}
+
+###
+@otherToken = {{loginOther.response.body.accessToken}}
+@otherRefreshToken = {{loginOther.response.body.refreshToken}}
+
+### Log in: wrong password -> "Invalid email or password"
+# Expected: 401 Unauthorized
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{userEmail}}",
+  "password": "wrong-password"
+}
+
+### Log in: unknown email -> the SAME message as for a wrong password
+# Expected: 401 Unauthorized
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "nobody-{{$timestamp}}@example.com",
+  "password": "{{userPassword}}"
+}
+
+### Current user
+# Expected: 200 OK  { id, email, role: "user", createdAt }
+GET {{baseUrl}}/auth/me
+Authorization: Bearer {{userToken}}
+
+### Current user: no Authorization header
+# Expected: 401 Unauthorized
+GET {{baseUrl}}/auth/me
+
+### Current user: wrong header format (not "Bearer <token>")
+# Expected: 401 Unauthorized
+GET {{baseUrl}}/auth/me
+Authorization: Token {{userToken}}
+
+### Current user: token is not a JWT
+# Expected: 401 Unauthorized
+GET {{baseUrl}}/auth/me
+Authorization: Bearer not-a-token
+
+### Current user: invalid signature (token signed with another secret; it is also expired)
+# Expected: 401 Unauthorized
+GET {{baseUrl}}/auth/me
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDAiLCJyb2xlIjoiYWRtaW4iLCJpYXQiOjE3MDAwMDAwMDAsImV4cCI6MTcwMDAwMDkwMH0.c2lnbmF0dXJlLW9mLWFub3RoZXItc2VjcmV0LXh4eHh4eHh4eA
+
+########################################################################
+# 2. Happy path (administrator + user): film -> hall -> showing -> booking
+########################################################################
+
+### Create a film (admin)
+# Expected: 201 Created
+# @name createFilm
+POST {{baseUrl}}/films
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "title": "Interstellar",
+  "durationMinutes": 169,
+  "releaseYear": 2014
+}
+
+###
+@filmId = {{createFilm.response.body.id}}
+
+### Create a hall 3 x 5 (admin; timestamp keeps the name unique between runs)
+# Expected: 201 Created
+# @name createHall
+POST {{baseUrl}}/halls
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "Red Hall {{$timestamp}}",
+  "rows": 3,
+  "seatsPerRow": 5
+}
+
+###
+@hallId = {{createHall.response.body.id}}
+@hallName = {{createHall.response.body.name}}
+
+### Create a showing (admin; price in kopecks)
+# Expected: 201 Created
+# @name createShowing
+POST {{baseUrl}}/showings
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "filmId": "{{filmId}}",
+  "hallId": "{{hallId}}",
+  "startsAt": "2030-01-15T18:00:00.000Z",
+  "price": 15000
+}
+
+###
+@showingId = {{createShowing.response.body.id}}
+
+### Book two seats as the user -> totalPrice = 15000 x 2 = 30000.
+# The owner is the user from the token: "userId" in the body is ignored.
+# Expected: 201 Created  { id, showingId, userId (= the user), seats, totalPrice }
+# @name createBooking
+POST {{baseUrl}}/showings/{{showingId}}/bookings
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{
+  "seats": [
+    { "row": 1, "seat": 1 },
+    { "row": 1, "seat": 2 }
+  ],
+  "userId": "{{missingId}}"
+}
+
+###
+@bookingId = {{createBooking.response.body.id}}
+
+### Book a seat as the second user
+# Expected: 201 Created
+# @name createOtherBooking
+POST {{baseUrl}}/showings/{{showingId}}/bookings
+Authorization: Bearer {{otherToken}}
+Content-Type: application/json
+
+{
+  "seats": [{ "row": 3, "seat": 5 }]
+}
+
+###
+@otherBookingId = {{createOtherBooking.response.body.id}}
+
+########################################################################
+# 3. Public routes: work WITHOUT a token
+########################################################################
+
+### List films
+# Expected: 200 OK
+GET {{baseUrl}}/films
+
+### Get the film
+# Expected: 200 OK
+GET {{baseUrl}}/films/{{filmId}}
+
+### List halls
+# Expected: 200 OK
+GET {{baseUrl}}/halls
+
+### Get the hall with its seats (3 x 5 = 15 seats)
+# Expected: 200 OK
+GET {{baseUrl}}/halls/{{hallId}}
+
+### List showings: { items, total, page: 1, limit: 20 } (sorted by startsAt asc, then id)
+# Expected: 200 OK
+GET {{baseUrl}}/showings
+
+### Filters, sorting and paging together
+# Expected: 200 OK
+GET {{baseUrl}}/showings?filmId={{filmId}}&date=2030-01-15&sort=desc&page=1&limit=1
+
+### Get the showing
+# Expected: 200 OK
+GET {{baseUrl}}/showings/{{showingId}}
+
+### Seat map: row 1 seats 1-2 and row 3 seat 5 are booked
+# Expected: 200 OK
+GET {{baseUrl}}/showings/{{showingId}}/seats
+
+########################################################################
+# 4. Routes for any logged-in user
+########################################################################
+
+### My bookings (only the user's own booking, with showing data)
+# Expected: 200 OK  [ { id, showingId, userId, seats, totalPrice, showing: {...} } ]
+GET {{baseUrl}}/bookings/my
+Authorization: Bearer {{userToken}}
+
+### My bookings: no token
+# Expected: 401 Unauthorized
+GET {{baseUrl}}/bookings/my
+
+### Book without a token
+# Expected: 401 Unauthorized
+POST {{baseUrl}}/showings/{{showingId}}/bookings
+Content-Type: application/json
+
+{
+  "seats": [{ "row": 2, "seat": 2 }]
+}
+
+### Cancel a booking without a token
+# Expected: 401 Unauthorized
+DELETE {{baseUrl}}/bookings/{{bookingId}}
+
+########################################################################
+# 5. Administrator routes: 401 without a token, 403 for role "user"
+########################################################################
+
+### Create a film: no token
+# Expected: 401 Unauthorized
+POST {{baseUrl}}/films
+Content-Type: application/json
+
+{
+  "title": "Dune",
+  "durationMinutes": 155,
+  "releaseYear": 2021
+}
+
+### Create a film: role "user"
+# Expected: 403 Forbidden
+POST {{baseUrl}}/films
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{
+  "title": "Dune",
+  "durationMinutes": 155,
+  "releaseYear": 2021
+}
+
+### Update a film: no token
+# Expected: 401 Unauthorized
+PATCH {{baseUrl}}/films/{{filmId}}
+Content-Type: application/json
+
+{
+  "title": "Hacked"
+}
+
+### Update a film: role "user"
+# Expected: 403 Forbidden
+PATCH {{baseUrl}}/films/{{filmId}}
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{
+  "title": "Hacked"
+}
+
+### Delete a film: no token
+# Expected: 401 Unauthorized
+DELETE {{baseUrl}}/films/{{filmId}}
+
+### Delete a film: role "user"
+# Expected: 403 Forbidden
+DELETE {{baseUrl}}/films/{{filmId}}
+Authorization: Bearer {{userToken}}
+
+### Create a hall: no token
+# Expected: 401 Unauthorized
+POST {{baseUrl}}/halls
+Content-Type: application/json
+
+{
+  "name": "Blue Hall",
+  "rows": 2,
+  "seatsPerRow": 2
+}
+
+### Create a hall: role "user"
+# Expected: 403 Forbidden
+POST {{baseUrl}}/halls
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{
+  "name": "Blue Hall",
+  "rows": 2,
+  "seatsPerRow": 2
+}
+
+### Delete a hall: no token
+# Expected: 401 Unauthorized
+DELETE {{baseUrl}}/halls/{{hallId}}
+
+### Delete a hall: role "user"
+# Expected: 403 Forbidden
+DELETE {{baseUrl}}/halls/{{hallId}}
+Authorization: Bearer {{userToken}}
+
+### All bookings: no token
+# Expected: 401 Unauthorized
+GET {{baseUrl}}/bookings
+
+### All bookings: role "user"
+# Expected: 403 Forbidden
+GET {{baseUrl}}/bookings
+Authorization: Bearer {{userToken}}
+
+### Create a showing: no token
+# Expected: 401 Unauthorized
+POST {{baseUrl}}/showings
+Content-Type: application/json
+
+{
+  "filmId": "{{filmId}}",
+  "hallId": "{{hallId}}",
+  "startsAt": "2030-01-16T18:00:00.000Z",
+  "price": 15000
+}
+
+### Create a showing: role "user"
+# Expected: 403 Forbidden
+POST {{baseUrl}}/showings
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{
+  "filmId": "{{filmId}}",
+  "hallId": "{{hallId}}",
+  "startsAt": "2030-01-16T18:00:00.000Z",
+  "price": 15000
+}
+
+### Bookings of a showing: no token
+# Expected: 401 Unauthorized
+GET {{baseUrl}}/showings/{{showingId}}/bookings
+
+### Bookings of a showing: role "user"
+# Expected: 403 Forbidden
+GET {{baseUrl}}/showings/{{showingId}}/bookings
+Authorization: Bearer {{userToken}}
+
+########################################################################
+# 6. Administrator routes as admin
+########################################################################
+
+### Update the film (any subset of fields)
+# Expected: 200 OK
+PATCH {{baseUrl}}/films/{{filmId}}
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "title": "Interstellar (IMAX)"
+}
+
+### All bookings (with userId of each owner)
+# Expected: 200 OK
+GET {{baseUrl}}/bookings
+Authorization: Bearer {{adminToken}}
+
+### Bookings of the showing
+# Expected: 200 OK
+GET {{baseUrl}}/showings/{{showingId}}/bookings
+Authorization: Bearer {{adminToken}}
+
+### Create a film without showings (to delete it)
+# Expected: 201 Created
+# @name createTempFilm
+POST {{baseUrl}}/films
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "title": "Temporary film",
+  "durationMinutes": 90,
+  "releaseYear": 2020
+}
+
+### Delete the film without showings
+# Expected: 204 No Content
+DELETE {{baseUrl}}/films/{{createTempFilm.response.body.id}}
+Authorization: Bearer {{adminToken}}
+
+### Create a hall without showings (to delete it)
+# Expected: 201 Created
+# @name createTempHall
+POST {{baseUrl}}/halls
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "Temporary hall {{$timestamp}}",
+  "rows": 2,
+  "seatsPerRow": 2
+}
+
+### Delete the hall without showings
+# Expected: 204 No Content
+DELETE {{baseUrl}}/halls/{{createTempHall.response.body.id}}
+Authorization: Bearer {{adminToken}}
+
+########################################################################
+# 7. Bookings and their owners
+########################################################################
+
+### The second user tries to cancel the user's booking
+# Expected: 403 Forbidden  "You can cancel only your own bookings"
+DELETE {{baseUrl}}/bookings/{{bookingId}}
+Authorization: Bearer {{otherToken}}
+
+### The booking was not cancelled: it is still in "my bookings" of the user
+# Expected: 200 OK
+GET {{baseUrl}}/bookings/my
+Authorization: Bearer {{userToken}}
+
+### The administrator cancels the second user's booking (any booking)
+# Expected: 204 No Content
+DELETE {{baseUrl}}/bookings/{{otherBookingId}}
+Authorization: Bearer {{adminToken}}
+
+### The second user has no bookings any more
+# Expected: 200 OK  []
+GET {{baseUrl}}/bookings/my
+Authorization: Bearer {{otherToken}}
+
+########################################################################
+# 8. Validation and not-found errors — films
+########################################################################
+
+### Film: missing fields
+# Expected: 400 Bad Request
+POST {{baseUrl}}/films
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "title": "No duration and year"
+}
+
+### Film: wrong types
+# Expected: 400 Bad Request
+POST {{baseUrl}}/films
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "title": 123,
+  "durationMinutes": "169",
+  "releaseYear": 2014
+}
+
+### Film: durationMinutes not a positive integer
+# Expected: 400 Bad Request
+POST {{baseUrl}}/films
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "title": "Zero",
+  "durationMinutes": 0,
+  "releaseYear": 2014
+}
+
+### Film: whitespace-only title (trimmed to "")
+# Expected: 400 Bad Request
+POST {{baseUrl}}/films
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "title": "   ",
+  "durationMinutes": 120,
+  "releaseYear": 2014
+}
+
+### Film: durationMinutes above the limit (max 1000)
+# Expected: 400 Bad Request
+POST {{baseUrl}}/films
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "title": "Too long",
+  "durationMinutes": 1001,
+  "releaseYear": 2014
+}
+
+### Film: not found
+# Expected: 404 Not Found
+GET {{baseUrl}}/films/{{missingId}}
+
+### Film: id is not a UUID
+# Expected: 400 Bad Request
+GET {{baseUrl}}/films/not-a-uuid
+
+### Film: PATCH with invalid value
+# Expected: 400 Bad Request
+PATCH {{baseUrl}}/films/{{filmId}}
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "durationMinutes": -10
+}
+
+### Film: PATCH with whitespace-only title
+# Expected: 400 Bad Request
+PATCH {{baseUrl}}/films/{{filmId}}
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "title": "   "
+}
+
+### Film: PATCH not found
+# Expected: 404 Not Found
+PATCH {{baseUrl}}/films/{{missingId}}
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "title": "Nobody"
+}
+
+### Film: DELETE not found
+# Expected: 404 Not Found
+DELETE {{baseUrl}}/films/{{missingId}}
+Authorization: Bearer {{adminToken}}
+
+### Film: DELETE film that has a showing (showings are never deleted with it)
+# Expected: 409 Conflict
+DELETE {{baseUrl}}/films/{{filmId}}
+Authorization: Bearer {{adminToken}}
+
+########################################################################
+# 9. Validation and not-found errors — halls
+########################################################################
+
+### Hall: missing fields
+# Expected: 400 Bad Request
+POST {{baseUrl}}/halls
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "Incomplete"
+}
+
+### Hall: wrong type
+# Expected: 400 Bad Request
+POST {{baseUrl}}/halls
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "Wrong type",
+  "rows": "3",
+  "seatsPerRow": 5
+}
+
+### Hall: not a positive integer
+# Expected: 400 Bad Request
+POST {{baseUrl}}/halls
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "Negative",
+  "rows": 0,
+  "seatsPerRow": -5
+}
+
+### Hall: whitespace-only name (trimmed to "")
+# Expected: 400 Bad Request
+POST {{baseUrl}}/halls
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "   ",
+  "rows": 3,
+  "seatsPerRow": 5
+}
+
+### Hall: rows and seatsPerRow above the limit (max 50 each)
+# Expected: 400 Bad Request
+POST {{baseUrl}}/halls
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "Huge hall",
+  "rows": 51,
+  "seatsPerRow": 100000
+}
+
+### Hall: duplicate name
+# Expected: 409 Conflict
+POST {{baseUrl}}/halls
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "{{hallName}}",
+  "rows": 1,
+  "seatsPerRow": 1
+}
+
+### Hall: not found
+# Expected: 404 Not Found
+GET {{baseUrl}}/halls/{{missingId}}
+
+### Hall: DELETE not found
+# Expected: 404 Not Found
+DELETE {{baseUrl}}/halls/{{missingId}}
+Authorization: Bearer {{adminToken}}
+
+### Hall: DELETE hall that has a showing (showings are never deleted with it)
+# Expected: 409 Conflict
+DELETE {{baseUrl}}/halls/{{hallId}}
+Authorization: Bearer {{adminToken}}
+
+########################################################################
+# 10. Validation and not-found errors — showings
+########################################################################
+
+### Showing: film does not exist ("Film with id ... not found")
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "filmId": "{{missingId}}",
+  "hallId": "{{hallId}}",
+  "startsAt": "2030-01-15T18:00:00.000Z",
+  "price": 15000
+}
+
+### Showing: hall does not exist ("Hall with id ... not found")
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "filmId": "{{filmId}}",
+  "hallId": "{{missingId}}",
+  "startsAt": "2030-01-15T18:00:00.000Z",
+  "price": 15000
+}
+
+### Showing: startsAt is not a valid ISO 8601 date-time
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "filmId": "{{filmId}}",
+  "hallId": "{{hallId}}",
+  "startsAt": "15.01.2030 18:00",
+  "price": 15000
+}
+
+### Showing: startsAt is in the past
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "filmId": "{{filmId}}",
+  "hallId": "{{hallId}}",
+  "startsAt": "2020-01-01T10:00:00.000Z",
+  "price": 15000
+}
+
+### Showing: price is not positive
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "filmId": "{{filmId}}",
+  "hallId": "{{hallId}}",
+  "startsAt": "2030-01-15T18:00:00.000Z",
+  "price": 0
+}
+
+### Showing: price is not an integer (kopecks)
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "filmId": "{{filmId}}",
+  "hallId": "{{hallId}}",
+  "startsAt": "2030-01-15T18:00:00.000Z",
+  "price": 150.5
+}
+
+### Showing: price above the limit (max 10 000 000 kopecks)
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "filmId": "{{filmId}}",
+  "hallId": "{{hallId}}",
+  "startsAt": "2030-01-15T18:00:00.000Z",
+  "price": 10000001
+}
+
+### Showing: bad date filter format
+# Expected: 400 Bad Request
+GET {{baseUrl}}/showings?date=15-01-2030
+
+### Showing: date filter is not a real date
+# Expected: 400 Bad Request
+GET {{baseUrl}}/showings?date=2030-02-30
+
+### Showing list: page is not a positive integer
+# Expected: 400 Bad Request
+GET {{baseUrl}}/showings?page=0
+
+### Showing list: page is not an integer
+# Expected: 400 Bad Request
+GET {{baseUrl}}/showings?page=1.5
+
+### Showing list: limit above 100
+# Expected: 400 Bad Request
+GET {{baseUrl}}/showings?limit=101
+
+### Showing list: limit below 1
+# Expected: 400 Bad Request
+GET {{baseUrl}}/showings?limit=0
+
+### Showing list: limit is not a number
+# Expected: 400 Bad Request
+GET {{baseUrl}}/showings?limit=ten
+
+### Showing list: sort is neither asc nor desc
+# Expected: 400 Bad Request
+GET {{baseUrl}}/showings?sort=up
+
+### Showing: not found
+# Expected: 404 Not Found
+GET {{baseUrl}}/showings/{{missingId}}
+
+### Showing: seats of a missing showing
+# Expected: 404 Not Found
+GET {{baseUrl}}/showings/{{missingId}}/seats
+
+########################################################################
+# 11. Validation and not-found errors — bookings
+########################################################################
+
+### Booking: showing does not exist
+# Expected: 404 Not Found
+POST {{baseUrl}}/showings/{{missingId}}/bookings
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{
+  "seats": [{ "row": 1, "seat": 1 }]
+}
+
+### Booking: empty seats array
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings/{{showingId}}/bookings
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{
+  "seats": []
+}
+
+### Booking: seat item without numbers
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings/{{showingId}}/bookings
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{
+  "seats": [{ "row": 2 }]
+}
+
+### Booking: non-positive numbers
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings/{{showingId}}/bookings
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{
+  "seats": [{ "row": 0, "seat": -1 }]
+}
+
+### Booking: duplicate seat inside the array
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings/{{showingId}}/bookings
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{
+  "seats": [
+    { "row": 2, "seat": 2 },
+    { "row": 2, "seat": 2 }
+  ]
+}
+
+### Booking: row outside the hall (hall has 3 rows)
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings/{{showingId}}/bookings
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{
+  "seats": [{ "row": 4, "seat": 1 }]
+}
+
+### Booking: seat outside the hall (5 seats per row)
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings/{{showingId}}/bookings
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{
+  "seats": [{ "row": 1, "seat": 6 }]
+}
+
+### Booking: one seat already booked (row 1 seat 2 belongs to the first booking) -> 409,
+# the transaction is rolled back: neither the booking nor row 1 seat 3 is stored.
+# Expected: 409 Conflict
+POST {{baseUrl}}/showings/{{showingId}}/bookings
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{
+  "seats": [
+    { "row": 1, "seat": 3 },
+    { "row": 1, "seat": 2 }
+  ]
+}
+
+### Check: row 1 seat 3 is still free after the failed request
+# Expected: 200 OK
+GET {{baseUrl}}/showings/{{showingId}}/seats
+
+### Booking: bookings of a missing showing
+# Expected: 404 Not Found
+GET {{baseUrl}}/showings/{{missingId}}/bookings
+Authorization: Bearer {{adminToken}}
+
+### Booking: cancel a missing booking
+# Expected: 404 Not Found
+DELETE {{baseUrl}}/bookings/{{missingId}}
+Authorization: Bearer {{userToken}}
+
+########################################################################
+# 12. The owner cancels the booking; the seats are free again
+########################################################################
+
+### Cancel own booking (its rows in booking_seats are deleted by ON DELETE CASCADE)
+# Expected: 204 No Content
+DELETE {{baseUrl}}/bookings/{{bookingId}}
+Authorization: Bearer {{userToken}}
+
+### All seats are free again (isBooked: false everywhere)
+# Expected: 200 OK
+GET {{baseUrl}}/showings/{{showingId}}/seats
+
+### The cancelled booking cannot be cancelled twice
+# Expected: 404 Not Found
+DELETE {{baseUrl}}/bookings/{{bookingId}}
+Authorization: Bearer {{userToken}}
+
+########################################################################
+# 13. Refresh token rotation
+########################################################################
+
+### Exchange the refresh token for a new pair
+# Expected: 200 OK  { accessToken, refreshToken }
+# @name refreshUser
+POST {{baseUrl}}/auth/refresh
+Content-Type: application/json
+
+{
+  "refreshToken": "{{userRefreshToken}}"
+}
+
+###
+@newUserToken = {{refreshUser.response.body.accessToken}}
+@newUserRefreshToken = {{refreshUser.response.body.refreshToken}}
+
+### The OLD refresh token was consumed by the rotation (already used)
+# Expected: 401 Unauthorized
+POST {{baseUrl}}/auth/refresh
+Content-Type: application/json
+
+{
+  "refreshToken": "{{userRefreshToken}}"
+}
+
+### Refresh: unknown token
+# Expected: 401 Unauthorized
+POST {{baseUrl}}/auth/refresh
+Content-Type: application/json
+
+{
+  "refreshToken": "this-token-does-not-exist"
+}
+
+### Refresh: no token in the body
+# Expected: 400 Bad Request
+POST {{baseUrl}}/auth/refresh
+Content-Type: application/json
+
+{}
+
+### The new access token works
+# Expected: 200 OK
+GET {{baseUrl}}/auth/me
+Authorization: Bearer {{newUserToken}}
+
+########################################################################
+# 14. Logout
+########################################################################
+
+### Logout: no access token
+# Expected: 401 Unauthorized
+POST {{baseUrl}}/auth/logout
+Content-Type: application/json
+
+{
+  "refreshToken": "{{newUserRefreshToken}}"
+}
+
+### Logout: invalid access token
+# Expected: 401 Unauthorized
+POST {{baseUrl}}/auth/logout
+Authorization: Bearer not-a-token
+Content-Type: application/json
+
+{
+  "refreshToken": "{{newUserRefreshToken}}"
+}
+
+### Logout: the refresh token belongs to ANOTHER user (it is not revoked)
+# Expected: 404 Not Found
+POST {{baseUrl}}/auth/logout
+Authorization: Bearer {{newUserToken}}
+Content-Type: application/json
+
+{
+  "refreshToken": "{{otherRefreshToken}}"
+}
+
+### Logout: the refresh token does not exist
+# Expected: 404 Not Found
+POST {{baseUrl}}/auth/logout
+Authorization: Bearer {{newUserToken}}
+Content-Type: application/json
+
+{
+  "refreshToken": "this-token-does-not-exist"
+}
+
+### Logout: revoke own refresh token
+# Expected: 204 No Content
+POST {{baseUrl}}/auth/logout
+Authorization: Bearer {{newUserToken}}
+Content-Type: application/json
+
+{
+  "refreshToken": "{{newUserRefreshToken}}"
+}
+
+### The revoked refresh token no longer works
+# Expected: 401 Unauthorized
+POST {{baseUrl}}/auth/refresh
+Content-Type: application/json
+
+{
+  "refreshToken": "{{newUserRefreshToken}}"
+}
+
+### The second user's refresh token was not touched by the failed logout
+# Expected: 200 OK
+POST {{baseUrl}}/auth/refresh
+Content-Type: application/json
+
+{
+  "refreshToken": "{{otherRefreshToken}}"
+}
